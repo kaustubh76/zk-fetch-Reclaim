@@ -1,7 +1,14 @@
+import * as crypto from 'crypto';
+import * as https from 'https';
 import { ReclaimClient } from '../../zkfetch';
 import { Options, secretOptions, Proof } from '../../interfaces';
 import { HttpMethod } from '../../types';
-import { CASHFREE_DOMAINS, CASHFREE_ENDPOINTS, DEFAULT_API_VERSION } from './constants';
+import {
+  CASHFREE_DOMAINS,
+  CASHFREE_AUTH_DOMAINS,
+  CASHFREE_ENDPOINTS,
+  DEFAULT_API_VERSION,
+} from './constants';
 import {
   CashfreePayoutConfig,
   CashfreeEnvironment,
@@ -18,11 +25,87 @@ import {
 } from './patterns';
 
 /**
- * A thin wrapper around ReclaimClient that provides pre-configured
- * zkTLS proof generation for Cashfree Payout API V2 endpoints.
+ * Generate the X-Cf-Signature header for Cashfree 2FA.
+ * Encrypts "clientId.timestamp" with the RSA public key using OAEP padding.
+ */
+function generateCfSignature(clientId: string, rsaPublicKey: string): string {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const data = `${clientId}.${timestamp}`;
+  const encrypted = crypto.publicEncrypt(
+    { key: rsaPublicKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
+    Buffer.from(data)
+  );
+  return encrypted.toString('base64');
+}
+
+/**
+ * Obtain a bearer token from Cashfree's /payout/v1/authorize endpoint.
  *
- * Credentials (x-client-id, x-client-secret) are placed in secretOptions
- * and are never revealed in the generated proof.
+ * @param clientId - Cashfree x-client-id
+ * @param clientSecret - Cashfree x-client-secret
+ * @param environment - 'production' or 'sandbox'
+ * @param rsaPublicKey - RSA public key PEM for X-Cf-Signature (required if IP not whitelisted)
+ * @returns Bearer token string
+ */
+export async function cashfreeAuthorize(
+  clientId: string,
+  clientSecret: string,
+  environment: CashfreeEnvironment = 'production',
+  rsaPublicKey?: string,
+): Promise<string> {
+  const authDomain = CASHFREE_AUTH_DOMAINS[environment];
+  const url = new URL(CASHFREE_ENDPOINTS.authorize, authDomain);
+
+  const headers: Record<string, string> = {
+    'X-Client-Id': clientId,
+    'X-Client-Secret': clientSecret,
+    'Content-Type': 'application/json',
+  };
+
+  if (rsaPublicKey) {
+    headers['X-Cf-Signature'] = generateCfSignature(clientId, rsaPublicKey);
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        path: url.pathname,
+        method: 'POST',
+        headers,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk: string) => (body += chunk));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed.status === 'SUCCESS' && parsed.data?.token) {
+              resolve(parsed.data.token);
+            } else {
+              reject(new Error(`Cashfree authorize failed: ${parsed.message || body}`));
+            }
+          } catch {
+            reject(new Error(`Cashfree authorize: invalid response: ${body}`));
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/**
+ * A wrapper around ReclaimClient for Cashfree Payout API zkTLS proofs.
+ *
+ * Cashfree Payout API requires 4 auth headers on every request:
+ * - `Authorization: Bearer <token>` (from /v1/authorize)
+ * - `x-client-id`
+ * - `x-client-secret`
+ * - `X-Cf-Signature` (RSA-encrypted clientId.timestamp)
+ *
+ * All of these are placed in secretOptions.headers and hidden from the proof.
  *
  * @example
  * ```typescript
@@ -32,6 +115,7 @@ import {
  *   credentials: {
  *     clientId: 'YOUR_CASHFREE_CLIENT_ID',
  *     clientSecret: 'YOUR_CASHFREE_CLIENT_SECRET',
+ *     rsaPublicKey: fs.readFileSync('public_key.pem', 'utf8'),
  *   },
  *   environment: 'sandbox',
  * });
@@ -45,7 +129,12 @@ import {
 export class CashfreePayoutClient {
   private reclaimClient: ReclaimClient;
   private baseUrl: string;
-  private secretHeaders: Record<string, string>;
+  private environment: CashfreeEnvironment;
+  private clientId: string;
+  private clientSecret: string;
+  private rsaPublicKey?: string;
+  private cachedBearerToken?: string;
+  private bearerTokenExpiry?: number;
   private useTee: boolean;
   private geoLocation?: string;
   private apiVersion: string;
@@ -54,27 +143,63 @@ export class CashfreePayoutClient {
     this.reclaimClient = new ReclaimClient(
       config.applicationId,
       config.applicationSecret,
-      config.logs
+      config.logs,
     );
 
-    const env: CashfreeEnvironment = config.environment || 'production';
-    this.baseUrl = CASHFREE_DOMAINS[env];
-
-    // These go into secretOptions.headers — hidden from proof
-    this.secretHeaders = {
-      'x-client-id': config.credentials.clientId,
-      'x-client-secret': config.credentials.clientSecret,
-    };
-
+    this.environment = config.environment || 'production';
+    this.baseUrl = CASHFREE_DOMAINS[this.environment];
+    this.clientId = config.credentials.clientId;
+    this.clientSecret = config.credentials.clientSecret;
+    this.rsaPublicKey = config.credentials.rsaPublicKey;
     this.apiVersion = config.credentials.apiVersion || DEFAULT_API_VERSION;
     this.useTee = config.useTee || false;
     this.geoLocation = config.geoLocation;
+
+    // If a pre-obtained bearer token was provided, cache it
+    if (config.credentials.bearerToken) {
+      this.cachedBearerToken = config.credentials.bearerToken;
+      // Assume ~4 minutes remaining (tokens last ~5 min)
+      this.bearerTokenExpiry = Math.floor(Date.now() / 1000) + 240;
+    }
+  }
+
+  /** Ensure we have a valid bearer token, obtaining one if needed */
+  private async ensureBearerToken(): Promise<string> {
+    const now = Math.floor(Date.now() / 1000);
+    if (this.cachedBearerToken && this.bearerTokenExpiry && now < this.bearerTokenExpiry) {
+      return this.cachedBearerToken;
+    }
+
+    const token = await cashfreeAuthorize(
+      this.clientId,
+      this.clientSecret,
+      this.environment,
+      this.rsaPublicKey,
+    );
+    this.cachedBearerToken = token;
+    // Cache for 4 minutes (tokens last ~5 min, leave 1 min buffer)
+    this.bearerTokenExpiry = now + 240;
+    return token;
+  }
+
+  /** Build the secret headers — ALL auth headers go here (hidden from proof) */
+  private async buildSecretHeaders(): Promise<Record<string, string>> {
+    const token = await this.ensureBearerToken();
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${token}`,
+      'x-client-id': this.clientId,
+      'x-client-secret': this.clientSecret,
+    };
+    if (this.rsaPublicKey) {
+      headers['X-Cf-Signature'] = generateCfSignature(this.clientId, this.rsaPublicKey);
+    }
+    return headers;
   }
 
   private buildPublicOptions(
     method: HttpMethod,
     body?: string,
-    context?: { contextAddress: string; contextMessage: string }
+    context?: { contextAddress: string; contextMessage: string },
   ): Options {
     return {
       method,
@@ -90,11 +215,12 @@ export class CashfreePayoutClient {
   }
 
   private buildSecretOptions(
+    secretHeaders: Record<string, string>,
     responseMatches: Array<{ type: 'regex' | 'contains'; value: string }>,
-    responseRedactions: Array<{ jsonPath?: string; regex?: string; xPath?: string }>
+    responseRedactions: Array<{ jsonPath?: string; regex?: string; xPath?: string }>,
   ): secretOptions {
     return {
-      headers: this.secretHeaders,
+      headers: secretHeaders,
       responseMatches,
       responseRedactions,
     };
@@ -103,26 +229,28 @@ export class CashfreePayoutClient {
   /**
    * Generate a zkTLS proof of a Cashfree transfer's current status.
    *
-   * Makes a GET request to /payout/v2/transfers/{transferId} and produces
+   * Makes a GET request to /payout/transfers?transfer_id=xxx and produces
    * a proof binding to the Cashfree domain, endpoint, response content,
-   * and timestamp. Authentication credentials are kept private.
+   * and timestamp. All auth credentials are kept private.
    *
    * Extracts: transfer_id, cf_transfer_id, status, transfer_amount
    */
   async proveTransferStatus(
-    options: ProveTransferStatusOptions
+    options: ProveTransferStatusOptions,
   ): Promise<CashfreeTransferStatusResult> {
-    const url = `${this.baseUrl}${CASHFREE_ENDPOINTS.getTransferStatus}/${options.transferId}`;
+    const url = `${this.baseUrl}${CASHFREE_ENDPOINTS.getTransferStatus}?transfer_id=${encodeURIComponent(options.transferId)}`;
 
     const publicOptions = this.buildPublicOptions(
       HttpMethod.GET,
       undefined,
-      options.context
+      options.context,
     );
 
+    const secretHeaders = await this.buildSecretHeaders();
     const secretOpts = this.buildSecretOptions(
+      secretHeaders,
       getTransferStatusMatches(options.expectedStatus),
-      getTransferStatusRedactions(options.additionalExtractions)
+      getTransferStatusRedactions(options.additionalExtractions),
     );
 
     const proof = await this.reclaimClient.zkFetch(
@@ -130,7 +258,7 @@ export class CashfreePayoutClient {
       publicOptions,
       secretOpts,
       options.retries,
-      options.retryInterval
+      options.retryInterval,
     );
 
     if (!proof) {
@@ -151,25 +279,27 @@ export class CashfreePayoutClient {
   /**
    * Generate a zkTLS proof of a Cashfree transfer creation.
    *
-   * Makes a POST request to /payout/v2/transfers and proves the response.
-   * This actually executes the transfer on Cashfree's side.
+   * Makes a POST request to /payout/transfers and proves the response.
+   * WARNING: This actually executes the transfer on Cashfree's side.
    *
    * Extracts: transfer_id, cf_transfer_id, status
    */
   async proveTransferCreation(
-    options: ProveTransferCreationOptions
+    options: ProveTransferCreationOptions,
   ): Promise<CashfreeTransferCreationResult> {
     const url = `${this.baseUrl}${CASHFREE_ENDPOINTS.createTransfer}`;
 
     const publicOptions = this.buildPublicOptions(
       HttpMethod.POST,
       JSON.stringify(options.transferRequest),
-      options.context
+      options.context,
     );
 
+    const secretHeaders = await this.buildSecretHeaders();
     const secretOpts = this.buildSecretOptions(
+      secretHeaders,
       getTransferCreationMatches(),
-      getTransferCreationRedactions()
+      getTransferCreationRedactions(),
     );
 
     const proof = await this.reclaimClient.zkFetch(
@@ -177,7 +307,7 @@ export class CashfreePayoutClient {
       publicOptions,
       secretOpts,
       options.retries,
-      options.retryInterval
+      options.retryInterval,
     );
 
     if (!proof) {
@@ -204,8 +334,8 @@ export class CashfreePayoutClient {
     return this.baseUrl;
   }
 
-  /** Get a copy of the secret headers (returns new object to prevent mutation) */
-  getSecretHeaders(): Record<string, string> {
-    return { ...this.secretHeaders };
+  /** Get a fresh set of secret headers (for advanced/direct usage) */
+  async getSecretHeaders(): Promise<Record<string, string>> {
+    return await this.buildSecretHeaders();
   }
 }
