@@ -149,19 +149,26 @@ describe('Response Extraction Patterns', () => {
 });
 
 describe('Response Match Builders', () => {
-  test('getTransferStatusMatches with expected status', () => {
+  test('getTransferStatusMatches with expected status includes contains + extraction regexes', () => {
     const matches = getTransferStatusMatches(CashfreeTransferStatus.SUCCESS);
-    expect(matches).toHaveLength(1);
+    expect(matches).toHaveLength(5); // 1 contains + 4 regex extractors
     expect(matches[0].value).toBe('"status":"SUCCESS"');
+    expect(matches[0].type).toBe('contains');
+    // Remaining are regex extractors with named capture groups
+    expect(matches[1].type).toBe('regex');
+    expect(matches[1].value).toContain('(?<transfer_id>');
   });
 
-  test('getTransferStatusMatches without expected status', () => {
+  test('getTransferStatusMatches without expected status has 4 extraction regexes', () => {
     const matches = getTransferStatusMatches();
-    expect(matches[0].value).toBe('"transfer_id"');
+    expect(matches).toHaveLength(4);
+    expect(matches[0].type).toBe('regex');
+    expect(matches[0].value).toContain('(?<transfer_id>');
   });
 
-  test('getTransferCreationMatches validates cf_transfer_id presence', () => {
+  test('getTransferCreationMatches validates cf_transfer_id and extracts fields', () => {
     const matches = getTransferCreationMatches();
+    expect(matches).toHaveLength(5); // 1 contains + 4 regex extractors
     expect(matches[0].value).toContain('cf_transfer_id');
   });
 });
