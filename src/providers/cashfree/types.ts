@@ -14,8 +14,8 @@ export enum CashfreeTransferStatus {
   REVERSED = 'REVERSED',
 }
 
-/** Transfer mode */
-export type CashfreeTransferMode = 'BANK' | 'UPI';
+/** Transfer mode (Cashfree V2 uses lowercase) */
+export type CashfreeTransferMode = 'banktransfer' | 'upi';
 
 /** Cashfree authentication credentials */
 export interface CashfreeCredentials {
@@ -23,6 +23,19 @@ export interface CashfreeCredentials {
   clientId: string;
   /** Cashfree x-client-secret */
   clientSecret: string;
+  /**
+   * RSA public key PEM string for generating X-Cf-Signature.
+   * Required for the /v1/authorize call when IP is not whitelisted.
+   * Obtained from Cashfree Dashboard > Developers > Two-Factor Auth > Public Key.
+   */
+  rsaPublicKey?: string;
+  /**
+   * Pre-obtained bearer token from /payout/v1/authorize.
+   * If provided, skips the authorize call. Token is valid for ~5 minutes.
+   * If not provided, the client will call /payout/v1/authorize automatically
+   * (requires rsaPublicKey or IP whitelisting).
+   */
+  bearerToken?: string;
   /** API version date string (defaults to '2024-01-01') */
   apiVersion?: string;
 }
