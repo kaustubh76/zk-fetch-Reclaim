@@ -7,7 +7,7 @@ import { CashfreeTransferStatus } from './types';
  * whitespace, and new fields being added to the response.
  */
 
-/** Redaction patterns for GET /payout/v2/transfers/{transfer_id} */
+/** Redaction patterns for GET /payout/transfers?transfer_id=xxx */
 export const TRANSFER_STATUS_REDACTIONS = {
   transferId: { jsonPath: '$.transfer_id' },
   cfTransferId: { jsonPath: '$.cf_transfer_id' },
@@ -15,12 +15,12 @@ export const TRANSFER_STATUS_REDACTIONS = {
   transferAmount: { jsonPath: '$.transfer_amount' },
 } as const;
 
-/** Redaction patterns for POST /payout/v2/transfers (creation response) */
+/** Redaction patterns for POST /payout/transfers (creation response — flat structure) */
 export const TRANSFER_CREATION_REDACTIONS = {
-  transferId: { jsonPath: '$.data.transfer_id' },
-  cfTransferId: { jsonPath: '$.data.cf_transfer_id' },
+  transferId: { jsonPath: '$.transfer_id' },
+  cfTransferId: { jsonPath: '$.cf_transfer_id' },
   status: { jsonPath: '$.status' },
-  dataStatus: { jsonPath: '$.data.status' },
+  statusCode: { jsonPath: '$.status_code' },
 } as const;
 
 /**
@@ -57,7 +57,7 @@ export function getTransferCreationRedactions() {
     TRANSFER_CREATION_REDACTIONS.transferId,
     TRANSFER_CREATION_REDACTIONS.cfTransferId,
     TRANSFER_CREATION_REDACTIONS.status,
-    TRANSFER_CREATION_REDACTIONS.dataStatus,
+    TRANSFER_CREATION_REDACTIONS.statusCode,
   ];
 }
 
