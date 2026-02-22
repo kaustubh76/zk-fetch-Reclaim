@@ -1,4 +1,4 @@
-export { CashfreePayoutClient } from './cashfree-payout';
+export { CashfreePayoutClient, cashfreeAuthorize } from './cashfree-payout';
 export {
   CashfreePayoutConfig,
   CashfreeCredentials,
@@ -13,6 +13,7 @@ export {
 } from './types';
 export {
   CASHFREE_DOMAINS,
+  CASHFREE_AUTH_DOMAINS,
   CASHFREE_ENDPOINTS,
   CASHFREE_ALLOWED_URL_PATTERNS,
   DEFAULT_API_VERSION,
