@@ -62,9 +62,13 @@ export function getTransferCreationRedactions() {
 }
 
 /**
- * Build responseMatches for transfer status validation.
- * Uses 'contains' type for literal string matching — simpler and more
- * robust than regex for exact value assertions.
+ * Build responseMatches for transfer status validation and extraction.
+ *
+ * Named capture groups in regex patterns populate `extractedParameters`
+ * on the proof. This is how the attestor exposes field values.
+ *
+ * When expectedStatus is provided, we use a contains match to assert it,
+ * plus regex patterns to extract all fields.
  */
 export function getTransferStatusMatches(expectedStatus?: CashfreeTransferStatus) {
   const matches: Array<{ type: 'regex' | 'contains'; value: string }> = [];
@@ -74,23 +78,51 @@ export function getTransferStatusMatches(expectedStatus?: CashfreeTransferStatus
       type: 'contains',
       value: `"status":"${expectedStatus}"`,
     });
-  } else {
-    // Validate that the response is a transfer object (has transfer_id field)
-    matches.push({
-      type: 'contains',
-      value: '"transfer_id"',
-    });
   }
+
+  // Extract key fields using named capture groups
+  matches.push({
+    type: 'regex',
+    value: '"transfer_id"\\s*:\\s*"(?<transfer_id>[^"]+)"',
+  });
+  matches.push({
+    type: 'regex',
+    value: '"cf_transfer_id"\\s*:\\s*"(?<cf_transfer_id>[^"]+)"',
+  });
+  matches.push({
+    type: 'regex',
+    value: '"status"\\s*:\\s*"(?<status>[^"]+)"',
+  });
+  matches.push({
+    type: 'regex',
+    value: '"transfer_amount"\\s*:\\s*(?<transfer_amount>[\\d.]+)',
+  });
 
   return matches;
 }
 
-/** Build responseMatches for transfer creation validation */
+/** Build responseMatches for transfer creation validation and extraction */
 export function getTransferCreationMatches() {
   return [
     {
       type: 'contains' as const,
       value: '"cf_transfer_id"',
+    },
+    {
+      type: 'regex' as const,
+      value: '"transfer_id"\\s*:\\s*"(?<transfer_id>[^"]+)"',
+    },
+    {
+      type: 'regex' as const,
+      value: '"cf_transfer_id"\\s*:\\s*"(?<cf_transfer_id>[^"]+)"',
+    },
+    {
+      type: 'regex' as const,
+      value: '"status"\\s*:\\s*"(?<status>[^"]+)"',
+    },
+    {
+      type: 'regex' as const,
+      value: '"status_code"\\s*:\\s*"(?<status_code>[^"]+)"',
     },
   ];
 }
