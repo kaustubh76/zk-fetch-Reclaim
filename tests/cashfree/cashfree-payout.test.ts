@@ -1,6 +1,7 @@
 import { config } from 'dotenv';
 config();
 import { expect, test, describe, beforeAll } from 'vitest';
+import { verifyProof } from '@reclaimprotocol/js-sdk';
 import {
   CashfreePayoutClient,
   CashfreeTransferStatus,
@@ -197,18 +198,43 @@ describe.skipIf(!hasCredentials)('Cashfree Payout - Integration Tests', () => {
     helpers = await import('./cashfree-payout');
   });
 
-  test('should prove transfer with SUCCESS status', async () => {
+  test('should prove transfer with SUCCESS status and verify proof', async () => {
     const result = await helpers.proveTransferSuccess();
+
+    // Proof exists and is structurally valid
     expect(result).toBeDefined();
     expect(result.proof).toBeDefined();
+    expect(result.proof.signatures).toBeInstanceOf(Array);
+    expect(result.proof.signatures.length).toBeGreaterThan(0);
+    expect(result.proof.witnesses.length).toBeGreaterThan(0);
+
+    // Extracted fields are correct
     expect(result.status).toBe('SUCCESS');
     expect(result.transferId).toBe(process.env.CASHFREE_TEST_TRANSFER_ID_SUCCESS);
+    expect(result.cfTransferId).toBeTruthy();
+    expect(result.transferAmount).toBeTruthy();
+
+    // Verify attestor signature (real cryptographic verification)
+    const isValid = await verifyProof(result.proof);
+    expect(isValid).toBe(true);
+
+    // Privacy check: secret headers must NOT appear in proof parameters
+    const params = result.proof.claimData.parameters;
+    expect(params).not.toContain('Bearer ');
+    expect(params).not.toContain(process.env.CASHFREE_CLIENT_SECRET);
+    expect(params).not.toContain('X-Cf-Signature');
   }, 120000);
 
-  test('should extract fields without status assertion', async () => {
+  test('should extract fields without status assertion and verify proof', async () => {
     const result = await helpers.proveTransferStatusGeneric();
-    expect(result.transferId).toBeDefined();
-    expect(result.status).toBeDefined();
+
+    // Fields extracted
+    expect(result.transferId).toBeTruthy();
+    expect(result.status).toBeTruthy();
     expect(Object.values(CashfreeTransferStatus)).toContain(result.status);
+
+    // Verify attestor signature
+    const isValid = await verifyProof(result.proof);
+    expect(isValid).toBe(true);
   }, 120000);
 });
