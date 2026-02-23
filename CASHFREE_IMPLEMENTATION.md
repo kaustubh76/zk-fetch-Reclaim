@@ -400,9 +400,17 @@ Then run:
 npx vitest run tests/cashfree
 ```
 
-Integration tests (2 additional tests):
-1. `should prove transfer with SUCCESS status` — generates zkTLS proof, asserts status = SUCCESS
-2. `should extract fields without status assertion` — proves transfer exists, extracts all fields
+Integration tests (2 additional tests) with **real proof verification**:
+1. `should prove transfer with SUCCESS status and verify proof`:
+   - Generates zkTLS proof against Cashfree sandbox
+   - Verifies attestor ECDSA signature via `verifyProof()` from `@reclaimprotocol/js-sdk`
+   - Asserts extracted fields (status, transferId, cfTransferId, transferAmount)
+   - Privacy check: ensures bearer token, client secret, and X-Cf-Signature do NOT appear in proof parameters
+   - Structural check: signatures array and witnesses array are non-empty
+2. `should extract fields without status assertion and verify proof`:
+   - Proves transfer exists without asserting a specific status
+   - Verifies attestor ECDSA signature
+   - Asserts extracted status is a valid `CashfreeTransferStatus` enum value
 
 ---
 
